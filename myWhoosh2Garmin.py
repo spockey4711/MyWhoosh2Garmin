@@ -129,6 +129,7 @@ try:
     )
     from fit_tool.profile.messages.session_message import SessionMessage
     from fit_tool.profile.messages.lap_message import LapMessage
+    from fit_tool.profile.messages.file_id_message import FileIdMessage
 except ImportError as e:
     logger.error(f"Error importing modules: {e}")
 
@@ -358,6 +359,9 @@ def cleanup_fit_file(fit_file_path: Path, new_file_path: Path) -> None:
             append_value(lap_values, message, "avg_cadence")
             append_value(lap_values, message, "max_cadence")
             append_value(lap_values, message, "total_calories")
+        if isinstance(message, FileIdMessage):
+            message.manufacturer = 1      # Garmin
+            message.product = 1836        # Edge 1000
         if isinstance(message, RecordMessage):
             message.remove_field(RecordTemperatureField.ID)
             append_value(cadence_values, message, "cadence")
@@ -376,17 +380,24 @@ def cleanup_fit_file(fit_file_path: Path, new_file_path: Path) -> None:
     logger.info(f"Cleaned-up file saved as {SCRIPT_DIR}/{new_file_path.name}")
 
 
-def get_most_recent_fit_file(fitfile_location: Path) -> Path:
+def get_most_recent_fit_files(fitfile_location: Path, count: int = 1) -> list[Path]:
     """
-    Returns the most recent .fit file based 
+    Returns the most recent .fit files based
     on versioning in the filename.
+
+    Args:
+        fitfile_location (Path): The directory containing the .fit files.
+        count (int): Number of recent files to return.
+
+    Returns:
+        list[Path]: List of the most recent .fit files.
     """
-    fit_files = fitfile_location.glob("MyNewActivity-*.fit")
-    fit_files = sorted(fit_files, key=lambda f: 
+    fit_files = list(fitfile_location.glob("MyNewActivity-*.fit"))
+    fit_files = sorted(fit_files, key=lambda f:
                        tuple(map(int, re.findall(r'(\d+)',
                                                  f.stem.split('-')[-1]))),
                        reverse=True)
-    return fit_files[0] if fit_files else Path()
+    return fit_files[:count] if fit_files else []
 
 
 def generate_new_filename(fit_file: Path) -> str:
@@ -395,49 +406,52 @@ def generate_new_filename(fit_file: Path) -> str:
     return f"{fit_file.stem}_{timestamp}.fit"
 
 
-def cleanup_and_save_fit_file(fitfile_location: Path) -> Path:
+def cleanup_and_save_fit_files(fitfile_location: Path, count: int = 1) -> list[Path]:
     """
-    Clean up the most recent .fit file in a directory and save it 
-    with a timestamped filename.
+    Clean up the most recent .fit files in a directory and save them
+    with timestamped filenames.
 
     Args:
         fitfile_location (Path): The directory containing the .fit files.
+        count (int): Number of recent files to process.
 
     Returns:
-        Path: The path to the newly saved and cleaned .fit file, 
-        or an empty Path if no .fit file is found or if the path is invalid.
+        list[Path]: List of paths to the newly saved and cleaned .fit files.
     """
     if not fitfile_location.is_dir():
         logger.info(f"The specified path is not a directory:"
                     f"{fitfile_location}.")
-        return Path()
+        return []
 
     logger.debug(f"Checking for .fit files in directory: {fitfile_location}.")
-    fit_file = get_most_recent_fit_file(fitfile_location)
+    fit_files = get_most_recent_fit_files(fitfile_location, count)
 
-    if not fit_file:
+    if not fit_files:
         logger.info("No .fit files found.")
-        return Path()
-
-    logger.debug(f"Found the most recent .fit file: {fit_file.name}.")
-    new_filename = generate_new_filename(fit_file)
+        return []
 
     if not BACKUP_FITFILE_LOCATION.exists():
         logger.error(f"{BACKUP_FITFILE_LOCATION} does not exist."
                      "Did you delete it?")
-        return Path()
+        return []
 
-    new_file_path = BACKUP_FITFILE_LOCATION / new_filename
-    logger.info(f"Cleaning up {new_file_path}.")
+    logger.debug(f"Found {len(fit_files)} .fit file(s) to process.")
+    new_file_paths = []
 
-    try:
-        cleanup_fit_file(fit_file, new_file_path)  
-        logger.info(f"Successfully cleaned {fit_file.name} "
-                    f"and saved it as {new_file_path.name}.")
-        return new_file_path
-    except Exception as e:
-        logger.error(f"Failed to process {fit_file.name}: {e}.")
-        return Path()
+    for fit_file in fit_files:
+        new_filename = generate_new_filename(fit_file)
+        new_file_path = BACKUP_FITFILE_LOCATION / new_filename
+        logger.info(f"Cleaning up {fit_file.name}.")
+
+        try:
+            cleanup_fit_file(fit_file, new_file_path)
+            logger.info(f"Successfully cleaned {fit_file.name} "
+                        f"and saved it as {new_file_path.name}.")
+            new_file_paths.append(new_file_path)
+        except Exception as e:
+            logger.error(f"Failed to process {fit_file.name}: {e}.")
+
+    return new_file_paths
 
 
 def upload_fit_file_to_garmin(new_file_path: Path):
@@ -461,19 +475,27 @@ def upload_fit_file_to_garmin(new_file_path: Path):
         logger.info("Duplicate activity found on Garmin Connect.")
 
 
-def main():
+def main(count: int = 1):
     """
-    Main function to authenticate to Garmin, clean and save the FIT file, 
-    and upload it to Garmin.
+    Main function to authenticate to Garmin, clean and save the FIT file(s),
+    and upload them to Garmin.
+
+    Args:
+        count (int): Number of recent files to process (default: 1).
 
     Returns:
         None
     """
     authenticate_to_garmin()
-    new_file_path = cleanup_and_save_fit_file(FITFILE_LOCATION)
-    if new_file_path:
+    new_file_paths = cleanup_and_save_fit_files(FITFILE_LOCATION, count)
+    for new_file_path in new_file_paths:
         upload_fit_file_to_garmin(new_file_path)
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description="Upload MyWhoosh FIT files to Garmin Connect")
+    parser.add_argument("-n", "--count", type=int, default=1,
+                        help="Number of recent activities to process (default: 1)")
+    args = parser.parse_args()
+    main(count=args.count)

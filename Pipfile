@@ -8,4 +8,4 @@ garth = "0.5.2"
 fit_tool = "0.9.13"
 
 [requires]
-python_version = "3.13"
+python_version = "3.14"
